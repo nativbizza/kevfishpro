@@ -1,7 +1,76 @@
 import { useState, useEffect } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
+import { doc, getDoc } from 'firebase/firestore'
+import { db } from '../firebase'
 import { getMoonInfo } from '../utils/moonPhase'
 import { SA_FISH_SPECIES, BAIT_OPTIONS, TIDE_TYPES, SA_LOCATIONS } from '../constants'
+import { nearestT4FLocation } from '../utils/tides4fishing'
+import { bearingToCompass } from '../hooks/useStormglass'
+
+async function getConditionsSnapshot() {
+  try {
+    const timeout = new Promise((resolve) => setTimeout(() => resolve(null), 4000))
+    const snap = await Promise.race([getDoc(doc(db, 'conditions/cache')), timeout])
+    if (!snap || !snap.exists?.()) return null
+    const { tides, marine, fetchedAt } = snap.data()
+    return { tides: tides ?? [], marine: marine ?? null, fetchedAt: fetchedAt ?? null }
+  } catch {
+    return null
+  }
+}
+
+// Find the best matching SA_LOCATIONS entry for a T4F location name
+function matchToSALocation(t4fName) {
+  // Exact match first
+  if (SA_LOCATIONS.includes(t4fName)) return t4fName
+  // SA_LOCATIONS entry contains the T4F name (e.g. "Cape Town (Kalk Bay)" contains "Kalk Bay")
+  const containing = SA_LOCATIONS.find((l) => l.includes(t4fName))
+  if (containing) return containing
+  // T4F name contains an SA_LOCATIONS entry (e.g. "Port Elizabeth" inside "Port Elizabeth (Gqeberha)")
+  const contained = SA_LOCATIONS.find((l) => t4fName.includes(l.replace(/ \(.*\)/, '')))
+  if (contained) return contained
+  return null  // will fall back to custom
+}
+
+// Infer tide type from today's tide extremes
+function inferTideType(tides) {
+  if (!tides?.length) return ''
+  const now = new Date()
+  const past = [...tides].reverse().find((t) => new Date(t.time) <= now)
+  const next = tides.find((t) => new Date(t.time) > now)
+  if (!past || !next) return ''
+  if (past.type === 'low'  && next.type === 'high') return 'Incoming'
+  if (past.type === 'high' && next.type === 'low')  return 'Outgoing'
+  return ''
+}
+
+// Current approx tide height — interpolate between surrounding extremes
+function currentTideHeight(tides) {
+  if (!tides?.length) return ''
+  const now = new Date()
+  const past = [...tides].reverse().find((t) => new Date(t.time) <= now)
+  const next = tides.find((t) => new Date(t.time) > now)
+  if (!past || !next) return ''
+  const tPast = new Date(past.time).getTime()
+  const tNext = new Date(next.time).getTime()
+  const frac = (now.getTime() - tPast) / (tNext - tPast)
+  const height = past.height + (next.height - past.height) * frac
+  return height.toFixed(1)
+}
+
+// Build a surf conditions summary string from marine data
+function buildSurfString(marine) {
+  if (!marine) return ''
+  const parts = []
+  if (marine.waveHeight !== '–') parts.push(`${marine.waveHeight}m swell`)
+  if (marine.wavePeriod  !== '–') parts.push(`${marine.wavePeriod}s period`)
+  if (marine.windSpeed   !== '–') {
+    const dir = marine.windDirection !== '–' ? ` ${bearingToCompass(parseFloat(marine.windDirection))}` : ''
+    parts.push(`${marine.windSpeed} m/s${dir} wind`)
+  }
+  if (marine.waterTemp   !== '–') parts.push(`${marine.waterTemp}°C water`)
+  return parts.join(', ')
+}
 
 const defaultCatch = () => ({ species: '', qty: 1, bait: '' })
 
@@ -48,15 +117,85 @@ export default function LogDay({ onSave }) {
     return emptyForm()
   })
 
-  const [moonInfo, setMoonInfo] = useState(null)
-  const [saving, setSaving] = useState(false)
-  const [errors, setErrors] = useState({})
+  const [moonInfo, setMoonInfo]       = useState(null)
+  const [saving, setSaving]           = useState(false)
+  const [errors, setErrors]           = useState({})
+  const [autoPopStatus, setAutoPopStatus] = useState(null) // null | 'loading' | 'done' | { error: string }
 
   useEffect(() => {
-    if (form.date) {
-      setMoonInfo(getMoonInfo(new Date(form.date)))
-    }
+    if (form.date) setMoonInfo(getMoonInfo(new Date(form.date)))
   }, [form.date])
+
+  // Auto-populate location + conditions for new sessions only
+  useEffect(() => {
+    if (isEditing) return
+    setAutoPopStatus('loading')
+
+    const run = async () => {
+      try {
+        // 1. Get GPS location
+        const coords = await new Promise((resolve, reject) => {
+          if (!navigator.geolocation) return reject(new Error('GPS not available on this device'))
+          navigator.geolocation.getCurrentPosition(
+            (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+            (err) => reject(new Error(
+              err.code === 1 ? 'Location permission denied' :
+              err.code === 2 ? 'GPS position unavailable' :
+              'GPS timed out'
+            )),
+            { timeout: 8000 }
+          )
+        })
+
+        // 2. Find nearest SA location
+        const nearest = nearestT4FLocation(coords.lat, coords.lng)
+        const matched = nearest ? matchToSALocation(nearest.name) : null
+
+        if (matched) {
+          setForm((f) => ({ ...f, location: matched }))
+        } else if (nearest) {
+          setForm((f) => ({ ...f, location: 'Other', locationCustom: nearest.name }))
+        }
+
+        // 3. Read conditions cache
+        const cache = await getConditionsSnapshot()
+
+        if (!cache) {
+          setAutoPopStatus({ error: 'Conditions not available — visit the home screen first to load conditions data' })
+          return
+        }
+
+        // Check if cache is from today
+        const cacheDate = cache.fetchedAt ? new Date(cache.fetchedAt).toISOString().slice(0, 10) : null
+        const today = new Date().toISOString().slice(0, 10)
+        if (cacheDate !== today) {
+          setAutoPopStatus({ error: 'Conditions data is from a previous day — visit home screen to refresh' })
+          return
+        }
+
+        // 4. Pre-fill conditions fields
+        const tideType   = inferTideType(cache.tides)
+        const tideHeight = currentTideHeight(cache.tides)
+        const surfStr    = buildSurfString(cache.marine)
+
+        setForm((f) => ({
+          ...f,
+          ...(tideType   ? { tideType }   : {}),
+          ...(tideHeight ? { tideHeight } : {}),
+          ...(surfStr    ? { surfConditions: surfStr } : {}),
+        }))
+
+        setAutoPopStatus('done')
+      } catch (err) {
+        const msg = err.message.includes('402') || err.message.includes('limit')
+          ? 'Auto-population not available — Stormglass daily limit reached, try again tomorrow'
+          : `Auto-population not available — ${err.message}`
+        setAutoPopStatus({ error: msg })
+      }
+    }
+
+    run()
+  }, [isEditing])
 
   const set = (field, value) => setForm((f) => ({ ...f, [field]: value }))
 
@@ -90,6 +229,11 @@ export default function LogDay({ onSave }) {
     try {
       const location =
         form.location === 'Other' ? form.locationCustom : form.location
+
+      // Best-effort — don't let a slow/failed cache read block the save
+      let conditions = null
+      try { conditions = await getConditionsSnapshot() } catch { /* ignore */ }
+
       await onSave(
         {
           date: form.date,
@@ -101,6 +245,7 @@ export default function LogDay({ onSave }) {
           moonPhase: moonInfo?.phaseName ?? '',
           moonIllumination: moonInfo?.illuminationPercent ?? 0,
           comments: form.comments,
+          ...(conditions ? { conditions } : {}),
         },
         isEditing ? state.session.id : null
       )
@@ -122,6 +267,23 @@ export default function LogDay({ onSave }) {
       <h1 className="text-2xl font-bold text-ocean-800 mb-6">
         {isEditing ? '✏️ Edit Session' : '🎣 Log Fishing Day'}
       </h1>
+
+      {/* Auto-populate banner */}
+      {!isEditing && autoPopStatus === 'loading' && (
+        <div className="flex items-center gap-2 bg-ocean-50 border border-ocean-100 rounded-xl px-4 py-2.5 text-xs text-ocean-600 animate-pulse">
+          <span>📍</span><span>Detecting location and loading conditions…</span>
+        </div>
+      )}
+      {!isEditing && autoPopStatus === 'done' && (
+        <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-100 rounded-xl px-4 py-2.5 text-xs text-emerald-700">
+          <span>✅</span><span>Location and conditions auto-populated — tap any field to change</span>
+        </div>
+      )}
+      {!isEditing && autoPopStatus?.error && (
+        <div className="flex items-start gap-2 bg-amber-50 border border-amber-100 rounded-xl px-4 py-2.5 text-xs text-amber-700">
+          <span className="shrink-0">⚠️</span><span>{autoPopStatus.error}</span>
+        </div>
+      )}
 
       <form onSubmit={handleSubmit} className="space-y-6">
 

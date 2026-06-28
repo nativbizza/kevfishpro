@@ -189,27 +189,58 @@ function SessionCard({ session, expanded, onToggle, onEdit, onDelete, totalCatch
       {/* Expanded detail */}
       {expanded && (
         <div className="border-t border-gray-100 px-4 py-3 space-y-3 bg-gray-50">
-          <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
-            {session.moonPhase && (
-              <Detail label="Moon" value={session.moonPhase} />
-            )}
+
+          {/* Catches */}
+          <div>
+            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">Catches</p>
+            {session.catches?.map((c, i) => (
+              <div key={i} className="flex justify-between text-sm py-1 border-b border-gray-100 last:border-0">
+                <span className="font-medium text-gray-700">{c.species} ×{c.qty}</span>
+                {c.bait && <span className="text-gray-400 text-xs">{c.bait}</span>}
+              </div>
+            ))}
+          </div>
+
+          {/* Conditions snapshot from Stormglass */}
+          {session.conditions?.marine && (
+            <div>
+              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">
+                Conditions at time of catch
+                {session.conditions.fetchedAt && (
+                  <span className="ml-1 text-gray-300 font-normal normal-case">
+                    · data from {new Date(session.conditions.fetchedAt).toLocaleTimeString('en-ZA', { hour: '2-digit', minute: '2-digit' })}
+                  </span>
+                )}
+              </p>
+              <div className="grid grid-cols-3 gap-2">
+                <CondChip emoji="🌊" label="Swell" value={`${session.conditions.marine.waveHeight}m`} />
+                <CondChip emoji="💨" label="Wind" value={`${session.conditions.marine.windSpeed} m/s`} />
+                <CondChip emoji="🌡️" label="Water" value={`${session.conditions.marine.waterTemp}°C`} />
+              </div>
+              {session.conditions.tides?.length > 0 && (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {session.conditions.tides.map((t, i) => {
+                    const time = new Date(t.time).toLocaleTimeString('en-ZA', { hour: '2-digit', minute: '2-digit' })
+                    return (
+                      <span key={i} className={`text-xs px-2 py-0.5 rounded-full border ${t.type === 'high' ? 'bg-ocean-50 text-ocean-700 border-ocean-100' : 'bg-gray-100 text-gray-500 border-gray-200'}`}>
+                        {t.type === 'high' ? '🔼' : '🔽'} {t.height?.toFixed(1)}m @ {time}
+                      </span>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Manual conditions (hand-entered) */}
+          <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-sm">
+            {session.moonPhase && <Detail label="Moon" value={session.moonPhase} />}
             {session.tideType && (
               <Detail label="Tide" value={`${session.tideType}${session.tideHeight ? ` · ${session.tideHeight}m` : ''}`} />
             )}
             {session.surfConditions && (
               <Detail label="Surf" value={session.surfConditions} />
             )}
-          </div>
-
-          {/* Per-catch bait info */}
-          <div>
-            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Catches</p>
-            {session.catches?.map((c, i) => (
-              <div key={i} className="flex justify-between text-sm py-0.5">
-                <span>{c.species} ×{c.qty}</span>
-                {c.bait && <span className="text-gray-400">{c.bait}</span>}
-              </div>
-            ))}
           </div>
 
           {session.comments && (
@@ -253,6 +284,15 @@ function Detail({ label, value }) {
     <div>
       <span className="text-gray-400 text-xs uppercase tracking-wide">{label} </span>
       <span className="text-gray-700">{value}</span>
+    </div>
+  )
+}
+
+function CondChip({ emoji, label, value }) {
+  return (
+    <div className="bg-white border border-gray-200 rounded-lg px-2.5 py-2 text-center">
+      <p className="text-xs text-gray-400">{emoji} {label}</p>
+      <p className="font-bold text-gray-700 text-sm mt-0.5">{value}</p>
     </div>
   )
 }
