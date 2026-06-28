@@ -1,0 +1,12 @@
+{
+  "projects": {
+    "default": "kevfishpro"
+  },
+  "targets": {
+    "kevfishpro": {
+      "hosting": {
+        "kevfishpro": ["kevfishpro"]
+      }
+    }
+  }
+}
