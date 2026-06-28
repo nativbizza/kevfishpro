@@ -1,0 +1,17 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer components {
+  .label {
+    @apply block text-xs font-medium text-gray-600 mb-1;
+  }
+  .err {
+    @apply text-xs text-red-500 mt-1;
+  }
+}
+
+body {
+  background-color: #f0f9ff;
+  font-family: system-ui, -apple-system, sans-serif;
+}
