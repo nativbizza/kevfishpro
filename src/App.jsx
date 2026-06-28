@@ -1,6 +1,7 @@
-import { Routes, Route, NavLink, Navigate } from 'react-router-dom'
+import { Routes, Route, NavLink, Link, Navigate } from 'react-router-dom'
 import LogDay from './pages/LogDay'
 import History from './pages/History'
+import Home from './pages/Home'
 import { useSessions } from './hooks/useSessions'
 
 export default function App() {
@@ -14,61 +15,48 @@ export default function App() {
     }
   }
 
+  const navLink = (to, label) => (
+    <NavLink
+      to={to}
+      className={({ isActive }) =>
+        `px-3 py-1.5 rounded-lg text-sm font-medium transition ${
+          isActive ? 'bg-ocean-600' : 'hover:bg-ocean-700'
+        }`
+      }
+    >
+      {label}
+    </NavLink>
+  )
+
   return (
     <div className="min-h-screen bg-ocean-50">
-      {/* Top nav */}
       <nav className="bg-ocean-800 text-white shadow-md">
         <div className="max-w-2xl mx-auto px-4 py-3 flex justify-between items-center">
-          <span className="font-bold text-lg tracking-tight">🎣 Fishing Log</span>
+          <Link to="/" className="font-bold text-lg tracking-tight hover:text-ocean-200 transition">
+            🎣 KevFishPro
+          </Link>
           <div className="flex gap-1">
-            <NavLink
-              to="/log"
-              className={({ isActive }) =>
-                `px-3 py-1.5 rounded-lg text-sm font-medium transition ${
-                  isActive ? 'bg-ocean-600' : 'hover:bg-ocean-700'
-                }`
-              }
-            >
-              + Log Day
-            </NavLink>
-            <NavLink
-              to="/history"
-              className={({ isActive }) =>
-                `px-3 py-1.5 rounded-lg text-sm font-medium transition ${
-                  isActive ? 'bg-ocean-600' : 'hover:bg-ocean-700'
-                }`
-              }
-            >
-              History
-            </NavLink>
+            {navLink('/log', '+ Log Day')}
+            {navLink('/history', 'History')}
           </div>
         </div>
       </nav>
 
-      {/* Routes */}
       <main className="pb-12">
         <Routes>
-          <Route path="/" element={<Navigate to="/history" replace />} />
-          <Route
-            path="/log"
-            element={<LogDay onSave={handleSave} />}
-          />
+          <Route path="/" element={<Home />} />
+          <Route path="/log" element={<LogDay onSave={handleSave} />} />
           <Route
             path="/history"
             element={
-              <History
-                sessions={sessions}
-                loading={loading}
-                onDelete={deleteSession}
-              />
+              <History sessions={sessions} loading={loading} onDelete={deleteSession} />
             }
           />
         </Routes>
       </main>
 
-      {/* Footer */}
       <footer className="text-center text-xs text-ocean-400 py-4">
-        Fishing Log · tides4fishing integration coming soon
+        KevFishPro · Powered by Stormglass & tides4fishing
       </footer>
     </div>
   )
