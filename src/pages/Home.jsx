@@ -644,12 +644,26 @@ function ConditionsBanner({ fetchedAt, loading, error, source, onRefresh }) {
     ? `${diffMins}m ago`
     : `${Math.floor(diffMins / 60)}h ${diffMins % 60}m ago`
 
+  if (source === 'default') {
+    return (
+      <div className="flex items-center justify-between bg-amber-50 border border-amber-100 rounded-xl px-4 py-2.5">
+        <div className="flex items-center gap-1.5 text-xs text-amber-700">
+          <span>⚠️</span>
+          <span>Showing <strong>estimated typical conditions</strong> — live data unavailable{error ? ` (${error.replace(' — showing estimated conditions', '')})` : ''}</span>
+        </div>
+        <button onClick={onRefresh} className="text-xs text-amber-600 font-semibold hover:text-amber-800 border border-amber-200 px-2.5 py-1 rounded-lg transition ml-3 shrink-0">
+          ↻ Retry
+        </button>
+      </div>
+    )
+  }
+
   return (
     <div className="flex items-center justify-between bg-ocean-50 border border-ocean-100 rounded-xl px-4 py-2.5">
       <div className="flex items-center gap-1.5 text-xs text-ocean-600">
         <span>{source === 'fresh' ? '🟢' : '💾'}</span>
         <span>
-          {source === 'fresh' ? 'Full Stormglass dataset fetched' : 'Stormglass data loaded from cache'} at{' '}
+          {source === 'fresh' ? 'Live Stormglass data fetched' : 'Conditions loaded from cache'} at{' '}
           <strong>{timeStr}</strong>
           <span className="text-ocean-400 ml-1">({agoStr})</span>
         </span>

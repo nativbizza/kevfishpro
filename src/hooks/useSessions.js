@@ -5,7 +5,7 @@ import {
   updateDoc,
   deleteDoc,
   doc,
-  getDocs,
+  onSnapshot,
   orderBy,
   query,
   serverTimestamp,
@@ -20,26 +20,26 @@ export function useSessions() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
-  const fetchSessions = async () => {
-    try {
-      setLoading(true)
-      const q = query(collection(db, COLLECTION), orderBy('date', 'desc'))
-      const snapshot = await getDocs(q)
-      const data = snapshot.docs.map((d) => ({
-        id: d.id,
-        ...d.data(),
-        date: d.data().date?.toDate?.() ?? new Date(d.data().date),
-      }))
-      setSessions(data)
-    } catch (err) {
-      setError(err.message)
-    } finally {
-      setLoading(false)
-    }
-  }
-
+  // Real-time listener — resolves from local cache immediately, no hanging
   useEffect(() => {
-    fetchSessions()
+    const q = query(collection(db, COLLECTION), orderBy('date', 'desc'))
+    const unsub = onSnapshot(
+      q,
+      (snapshot) => {
+        const data = snapshot.docs.map((d) => ({
+          id: d.id,
+          ...d.data(),
+          date: d.data().date?.toDate?.() ?? new Date(d.data().date),
+        }))
+        setSessions(data)
+        setLoading(false)
+      },
+      (err) => {
+        setError(err.message)
+        setLoading(false)
+      }
+    )
+    return () => unsub()
   }, [])
 
   const addSession = async (sessionData) => {
@@ -49,24 +49,21 @@ export function useSessions() {
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     })
-    await fetchSessions()
     return docRef.id
+    // No manual refetch needed — onSnapshot updates automatically
   }
 
   const updateSession = async (id, sessionData) => {
-    const ref = doc(db, COLLECTION, id)
-    await updateDoc(ref, {
+    await updateDoc(doc(db, COLLECTION, id), {
       ...sessionData,
       date: Timestamp.fromDate(new Date(sessionData.date)),
       updatedAt: serverTimestamp(),
     })
-    await fetchSessions()
   }
 
   const deleteSession = async (id) => {
     await deleteDoc(doc(db, COLLECTION, id))
-    await fetchSessions()
   }
 
-  return { sessions, loading, error, addSession, updateSession, deleteSession, refetch: fetchSessions }
+  return { sessions, loading, error, addSession, updateSession, deleteSession }
 }
