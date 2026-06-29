@@ -1,45 +1,30 @@
 import { useState, useEffect } from 'react'
+import { Geolocation } from '@capacitor/geolocation'
+
+async function getPosition() {
+  try {
+    await Geolocation.requestPermissions()
+  } catch {
+    // web platform doesn't support requestPermissions, falls through to getCurrentPosition
+  }
+  const pos = await Geolocation.getCurrentPosition({ enableHighAccuracy: true, timeout: 10000 })
+  return { lat: pos.coords.latitude, lng: pos.coords.longitude }
+}
 
 export function useGeolocation() {
-  const [coords, setCoords] = useState(null)   // { lat, lng }
+  const [coords, setCoords] = useState(null)
   const [error, setError] = useState(null)
   const [loading, setLoading] = useState(true)
 
-  useEffect(() => {
-    if (!navigator.geolocation) {
-      setError('Geolocation is not supported by your browser')
-      setLoading(false)
-      return
-    }
-
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        setCoords({ lat: pos.coords.latitude, lng: pos.coords.longitude })
-        setLoading(false)
-      },
-      (err) => {
-        setError(err.message)
-        setLoading(false)
-      },
-      { enableHighAccuracy: true, timeout: 10000 }
-    )
-  }, [])
-
-  const refresh = () => {
+  const fetch = () => {
     setLoading(true)
     setError(null)
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        setCoords({ lat: pos.coords.latitude, lng: pos.coords.longitude })
-        setLoading(false)
-      },
-      (err) => {
-        setError(err.message)
-        setLoading(false)
-      },
-      { enableHighAccuracy: true, timeout: 10000 }
-    )
+    getPosition()
+      .then((c) => { setCoords(c); setLoading(false) })
+      .catch((err) => { setError(err.message); setLoading(false) })
   }
 
-  return { coords, error, loading, refresh }
+  useEffect(() => { fetch() }, [])
+
+  return { coords, error, loading, refresh: fetch }
 }

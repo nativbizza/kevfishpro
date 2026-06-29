@@ -1,0 +1,16 @@
+{
+  "appId": "com.kevfishpro.app",
+  "appName": "KevFishPro",
+  "webDir": "dist",
+  "android": {
+    "buildOptions": {
+      "releaseType": "APK"
+    }
+  },
+  "plugins": {
+    "SplashScreen": {
+      "launchShowDuration": 2000,
+      "backgroundColor": "#1a1a2e"
+    }
+  }
+}

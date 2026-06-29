@@ -2,6 +2,7 @@ import { Routes, Route, NavLink, Link, Navigate } from 'react-router-dom'
 import LogDay from './pages/LogDay'
 import History from './pages/History'
 import Home from './pages/Home'
+import Releases from './pages/Releases'
 import { useSessions } from './hooks/useSessions'
 
 export default function App() {
@@ -52,6 +53,7 @@ export default function App() {
               <History sessions={sessions} loading={loading} onDelete={deleteSession} />
             }
           />
+          <Route path="/releases" element={<Releases />} />
         </Routes>
       </main>
 
