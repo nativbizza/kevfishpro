@@ -1,40 +1,150 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
+import { doc, getDoc, setDoc } from 'firebase/firestore'
+import { db } from '../firebase'
 import { useGeolocation } from '../hooks/useGeolocation'
-import { useConditionsCache } from '../hooks/useConditionsCache'
+import { useConditionsCache, batchFetchAllLocations } from '../hooks/useConditionsCache'
 import { bearingToCompass } from '../hooks/useStormglass'
 import { useInsights } from '../hooks/useInsights'
 import { useSessions } from '../hooks/useSessions'
-import { nearestT4FLocation, PROVINCES, locationsByProvince } from '../utils/tides4fishing'
+import { useAuth } from '../contexts/AuthContext'
+import { nearestT4FLocation, T4F_LOCATIONS, PROVINCES, locationsByProvince } from '../utils/tides4fishing'
 import { overallRatingLabel } from '../utils/conditionInsights'
 import { Stars } from '../components/InsightCard'
 import Modal from '../components/Modal'
 
-export default function Home() {
-  const { coords: gpsCoords, loading: locLoading, error: locError, refresh } = useGeolocation()
-  const [manualLocation, setManualLocation] = useState(null)
+const LS_KEY = 'kevfishpro_location'
+
+function loadSavedLocation() {
+  try { return JSON.parse(localStorage.getItem(LS_KEY) || 'null') } catch { return null }
+}
+
+export default function Home({ isAdmin = false }) {
+  const { user } = useAuth()
+
+  // GPS — only used when user explicitly requests it
+  const { coords: gpsCoords, loading: locLoading, refresh: refreshGPS } = useGeolocation()
+  const [gpsRequested, setGpsRequested] = useState(false)
+
+  // Saved location — localStorage (fast) with Firestore as fallback/sync
+  const [savedLocation, setSavedLocation]     = useState(loadSavedLocation)
+  const [locationLoading, setLocationLoading] = useState(!loadSavedLocation()) // true only when localStorage is empty
+
   const [showPicker, setShowPicker] = useState(false)
   const [selectedProvince, setSelectedProvince] = useState(null)
   const [activeInsight, setActiveInsight] = useState(null)
   const [showConditions, setShowConditions] = useState(false)
+  const [batchProgress, setBatchProgress] = useState(null) // null | string | 'done'
 
-  const coords = manualLocation ?? gpsCoords
-  const { tides, marine, fetchedAt, loading: tidesLoading, error: tidesError, source, refresh: refreshConditions } = useConditionsCache(coords)
+  // On load: if localStorage is empty, check Firestore for a previously saved location
+  useEffect(() => {
+    if (!user) { setLocationLoading(false); return }
+    if (loadSavedLocation()) { setLocationLoading(false); return }
+
+    const fetchFromFirestore = async () => {
+      try {
+        const snap = await getDoc(doc(db, 'users', user.uid))
+        if (snap.exists() && snap.data().savedLocation) {
+          const loc = snap.data().savedLocation
+          setSavedLocation(loc)
+          localStorage.setItem(LS_KEY, JSON.stringify(loc)) // cache locally
+        }
+      } catch { /* offline or rules issue — stay null, prompt user */ }
+      setLocationLoading(false)
+    }
+    fetchFromFirestore()
+  }, [user?.uid])
+
+  // Active location IS the saved location — no GPS fallback for data
+  const activeLocation = savedLocation
+
+  // T4F record for the saved location (needed for the tides4fishing link)
+  const t4fLocation = savedLocation
+    ? T4F_LOCATIONS.find((l) => l.name === savedLocation.name) ?? null
+    : null
+
+  const {
+    tides, marine,
+    weatherStatus, tidesStatus,
+    weatherFetchedAt, tidesFetchedAt,
+    weatherError, tidesError,
+    loading: tidesLoading,
+    refresh: refreshConditions,
+  } = useConditionsCache(user ? activeLocation : null)
   const { sessions } = useSessions()
-  const nearest = coords ? nearestT4FLocation(coords.lat, coords.lng) : null
-  const province = manualLocation?.province ?? nearest?.province ?? null
-  const { solunar, overallScore, insights, tideType } = useInsights({ coords, marine, tides, sessions, province })
+  const province = activeLocation?.province ?? null
+  const { solunar, overallScore, insights, tideType } = useInsights({ coords: activeLocation, marine, tides, sessions, province })
   const rating = overallRatingLabel(overallScore)
 
-  const locationLabel = manualLocation
-    ? `${manualLocation.name}, ${manualLocation.province}`
-    : nearest ? `${nearest.name} (GPS)` : 'Detecting…'
+  const locationLabel = savedLocation
+    ? `${savedLocation.name}, ${savedLocation.province}`
+    : gpsRequested && locLoading ? '📍 Detecting…' : 'No location set'
 
-  const handleManualSelect = (loc) => {
-    setManualLocation({ lat: loc.lat, lng: loc.lng, name: loc.name, province: loc.province })
-    setShowPicker(false); setSelectedProvince(null)
+  // When GPS resolves after user requested it → persist as location
+  const gpsNearest = gpsRequested && gpsCoords ? nearestT4FLocation(gpsCoords.lat, gpsCoords.lng) : null
+  useEffect(() => {
+    if (gpsRequested && gpsNearest) {
+      persistLocation({ name: gpsNearest.name, lat: gpsNearest.lat, lng: gpsNearest.lng, province: gpsNearest.province })
+      setGpsRequested(false)
+      setShowPicker(false)
+      setSelectedProvince(null)
+    }
+  }, [gpsRequested, gpsNearest?.name])
+
+  const handleBatchRefresh = async () => {
+    setBatchProgress('Starting…')
+    try {
+      await batchFetchAllLocations((msg) => setBatchProgress(msg))
+      setBatchProgress('done')
+      setTimeout(() => setBatchProgress(null), 3000)
+      refreshConditions()
+    } catch {
+      setBatchProgress(null)
+    }
   }
+
+  // Persist location to localStorage + Firestore
+  const persistLocation = async (locData) => {
+    setSavedLocation(locData)
+    localStorage.setItem(LS_KEY, JSON.stringify(locData))
+    if (user) {
+      try {
+        await setDoc(doc(db, 'users', user.uid), { savedLocation: locData }, { merge: true })
+      } catch (e) {
+        console.error('persistLocation Firestore write failed:', e.code, e.message)
+      }
+    }
+  }
+
+  const clearLocation = async () => {
+    setSavedLocation(null)
+    localStorage.removeItem(LS_KEY)
+    if (user) {
+      try {
+        await setDoc(doc(db, 'users', user.uid), { savedLocation: null }, { merge: true })
+      } catch (e) {
+        console.error('clearLocation Firestore write failed:', e.code, e.message)
+      }
+    }
+  }
+
+  // Selecting a location in the picker saves to both stores
+  const handleSelectLocation = (loc) => {
+    persistLocation({ name: loc.name, lat: loc.lat, lng: loc.lng, province: loc.province })
+    setShowPicker(false)
+    setSelectedProvince(null)
+  }
+
   const handleUseGPS = () => {
-    setManualLocation(null); setShowPicker(false); setSelectedProvince(null); refresh()
+    setGpsRequested(true)
+    refreshGPS()
+    setShowPicker(false)
+    setSelectedProvince(null)
+  }
+
+  const handleClearLocation = () => {
+    clearLocation()
+    setShowPicker(false)
+    setSelectedProvince(null)
   }
 
   // Top 6 species by score
@@ -75,24 +185,36 @@ export default function Home() {
         <div className="mt-4 flex items-center justify-between bg-ocean-700 rounded-xl px-4 py-2.5">
           <div>
             <p className="text-xs text-ocean-300">Location</p>
-            <p className="font-semibold text-sm">
-              {locLoading && !manualLocation ? '📍 Detecting…' : locationLabel}
-            </p>
+            <p className="font-semibold text-sm">{locationLabel}</p>
           </div>
-          <button
-            onClick={() => { setShowPicker(!showPicker); setSelectedProvince(null) }}
-            className="text-xs bg-ocean-600 hover:bg-ocean-500 px-3 py-1.5 rounded-lg font-medium transition"
-          >
-            Change
-          </button>
+          <div className="flex items-center gap-2">
+            {savedLocation && (
+              <button
+                onClick={handleClearLocation}
+                className="text-xs text-ocean-400 hover:text-ocean-200 transition"
+                title="Clear saved location"
+              >✕</button>
+            )}
+            <button
+              onClick={() => { setShowPicker(!showPicker); setSelectedProvince(null) }}
+              className="text-xs bg-ocean-600 hover:bg-ocean-500 px-3 py-1.5 rounded-lg font-medium transition"
+            >
+              {savedLocation ? 'Change' : 'Set Location'}
+            </button>
+          </div>
         </div>
-        {locError && !manualLocation && (
-          <p className="text-xs text-amber-300 mt-2">⚠️ Location denied — select manually</p>
+        {gpsRequested && locLoading && (
+          <p className="text-xs text-ocean-300 mt-2 animate-pulse">📍 Getting GPS location…</p>
         )}
       </div>
 
       {/* ── Conditions data banner ────────────────────────────────────────── */}
-      <ConditionsBanner fetchedAt={fetchedAt} loading={tidesLoading} error={tidesError} source={source} onRefresh={refreshConditions} />
+      <ConditionsBanner
+        weatherStatus={weatherStatus} tidesStatus={tidesStatus}
+        weatherFetchedAt={weatherFetchedAt} tidesFetchedAt={tidesFetchedAt}
+        weatherError={weatherError} tidesError={tidesError}
+        isAdmin={isAdmin} onBatchRefresh={handleBatchRefresh} batchProgress={batchProgress}
+      />
 
       {/* ── Location picker ──────────────────────────────────────────────── */}
       {showPicker && (
@@ -119,8 +241,8 @@ export default function Home() {
                 <span className="font-semibold text-gray-800 text-sm">{selectedProvince}</span>
               </div>
               {locationsByProvince(selectedProvince).map((loc) => (
-                <button key={loc.url} onClick={() => handleManualSelect(loc)}
-                  className={`w-full text-left px-3 py-2.5 rounded-lg text-sm transition ${manualLocation?.name === loc.name ? 'bg-ocean-100 text-ocean-800 font-semibold' : 'hover:bg-gray-50 text-gray-700'}`}>
+                <button key={loc.url} onClick={() => handleSelectLocation(loc)}
+                  className={`w-full text-left px-3 py-2.5 rounded-lg text-sm transition ${savedLocation?.name === loc.name ? 'bg-ocean-100 text-ocean-800 font-semibold' : 'hover:bg-gray-50 text-gray-700'}`}>
                   {loc.name}
                 </button>
               ))}
@@ -129,10 +251,34 @@ export default function Home() {
         </div>
       )}
 
+      {/* ── No location state ────────────────────────────────────────────── */}
+      {!activeLocation && !showPicker && (
+        locationLoading ? (
+          <div className="bg-white border border-gray-100 rounded-2xl p-8 text-center shadow-sm">
+            <p className="text-3xl mb-3 animate-pulse">📍</p>
+            <p className="text-sm text-gray-400 animate-pulse">Loading your saved location…</p>
+          </div>
+        ) : (
+          <div className="bg-white border border-gray-200 rounded-2xl p-8 text-center shadow-sm">
+            <p className="text-4xl mb-3">📍</p>
+            <p className="font-bold text-gray-800 text-base">Select your fishing location</p>
+            <p className="text-sm text-gray-400 mt-1 mb-5">
+              Pick a spot to load live tide and weather conditions
+            </p>
+            <button
+              onClick={() => setShowPicker(true)}
+              className="bg-ocean-700 hover:bg-ocean-800 text-white px-6 py-2.5 rounded-xl text-sm font-semibold transition"
+            >
+              Choose Location
+            </button>
+          </div>
+        )
+      )}
+
       {/* ══════════════════════════════════════════════════════════════════
           SECTION 1 — CURRENT CONDITIONS
       ══════════════════════════════════════════════════════════════════ */}
-      <SectionHeader title="🌊 Current Conditions" />
+      {activeLocation && <SectionHeader title="🌊 Current Conditions" />}
 
       <button
         onClick={() => setShowConditions(true)}
@@ -140,57 +286,21 @@ export default function Home() {
       >
         <div className="flex justify-between items-center mb-3">
           <span className="text-sm font-semibold text-gray-700">
-            {nearest ? nearest.name : 'Your Location'}
+            {savedLocation ? savedLocation.name : 'Your Location'}
           </span>
           <span className="text-xs text-ocean-600 font-medium">Full details →</span>
         </div>
 
         {tidesLoading ? (
-          <p className="text-sm text-gray-400 animate-pulse">Loading…</p>
+          <p className="text-sm text-gray-400 animate-pulse">Loading conditions…</p>
         ) : (
           <div className="grid grid-cols-2 gap-2.5">
-            {/* Tide */}
-            <CondStat
-              emoji={tideType === 'Incoming' ? '🔼' : tideType === 'Outgoing' ? '🔽' : '🌊'}
-              label="Tide"
-              value={tideType ?? '–'}
-              sub={nextTideStr(tides)}
-            />
-            {/* Swell */}
-            <CondStat
-              emoji="🌀"
-              label="Swell"
-              value={marine ? `${marine.waveHeight}m` : '–'}
-              sub={marine ? `${marine.wavePeriod}s · ${bearingToCompass(marine.waveDirection)}` : ''}
-            />
-            {/* Wind */}
-            <CondStat
-              emoji="💨"
-              label="Wind"
-              value={marine ? `${marine.windSpeed} m/s` : '–'}
-              sub={marine ? bearingToCompass(marine.windDirection) : ''}
-            />
-            {/* Water temp */}
-            <CondStat
-              emoji="🌡️"
-              label="Water Temp"
-              value={marine ? `${marine.waterTemp}°C` : '–'}
-              sub={marine ? tempNote(parseFloat(marine.waterTemp)) : ''}
-            />
-            {/* Moon */}
-            <CondStat
-              emoji="🌙"
-              label="Moon"
-              value={solunar?.moonLabel?.split(' — ')[0] ?? '–'}
-              sub={solunar ? `${solunar.moonIllum}% lit` : ''}
-            />
-            {/* Solunar */}
-            <CondStat
-              emoji={solunar?.activePeriod ? '🟢' : '🕐'}
-              label="Solunar"
-              value={solunar?.activePeriod ? 'Active now' : solunar?.nextPeriod ? `Next ${solunar.minsToNext}m` : '–'}
-              sub={solunar?.activePeriod?.label ?? solunar?.nextPeriod?.label ?? ''}
-            />
+            <CondStat emoji={tideType === 'Incoming' ? '🔼' : tideType === 'Outgoing' ? '🔽' : '🌊'} label="Tide" value={tideType ?? '–'} sub={nextTideStr(tides)} />
+            <CondStat emoji="🌀" label="Swell" value={marine ? `${marine.waveHeight}m` : '–'} sub={marine ? `${marine.wavePeriod}s · ${bearingToCompass(marine.waveDirection)}` : ''} />
+            <CondStat emoji="💨" label="Wind" value={marine ? `${marine.windSpeed} m/s` : '–'} sub={marine ? bearingToCompass(marine.windDirection) : ''} />
+            <CondStat emoji="🌡️" label="Water Temp" value={marine ? `${marine.waterTemp}°C` : '–'} sub={marine ? tempNote(parseFloat(marine.waterTemp)) : ''} />
+            <CondStat emoji="🌙" label="Moon" value={solunar?.moonLabel?.split(' — ')[0] ?? '–'} sub={solunar ? `${solunar.moonIllum}% lit` : ''} />
+            <CondStat emoji={solunar?.activePeriod ? '🟢' : '🕐'} label="Solunar" value={solunar?.activePeriod ? 'Active now' : solunar?.nextPeriod ? `Next ${solunar.minsToNext}m` : '–'} sub={solunar?.activePeriod?.label ?? solunar?.nextPeriod?.label ?? ''} />
           </div>
         )}
       </button>
@@ -198,12 +308,12 @@ export default function Home() {
       {/* ══════════════════════════════════════════════════════════════════
           SECTION 2 — SPECIES INSIGHTS
       ══════════════════════════════════════════════════════════════════ */}
-      <SectionHeader
+      {activeLocation && <SectionHeader
         title="🐟 Species Insights"
         sub="Ranked by how well current conditions match each species. Based on SA fishing knowledge."
-      />
+      />}
 
-      <div className="space-y-2.5">
+      {activeLocation && <div className="space-y-2.5">
         {topSpecies.map((s) => (
           <SpeciesCard key={s.id} insight={s} onClick={() => setActiveInsight(s)} />
         ))}
@@ -225,17 +335,17 @@ export default function Home() {
             ))}
           </div>
         )}
-      </div>
+      </div>}
 
       {/* ══════════════════════════════════════════════════════════════════
           SECTION 3 — TIMEFRAME INSIGHTS
       ══════════════════════════════════════════════════════════════════ */}
-      <SectionHeader
+      {activeLocation && <SectionHeader
         title="⏰ Timeframe Insights"
         sub="Best fishing windows for today based on solunar theory, sun and moon positions."
-      />
+      />}
 
-      <TimeframeInsights solunar={solunar} onPeriodTap={(p) => setActiveInsight({
+      {activeLocation && <TimeframeInsights solunar={solunar} onPeriodTap={(p) => setActiveInsight({
         id: 'timeframe-detail',
         source: 'solunar',
         icon: p.type === 'major' ? '🌕' : '🌙',
@@ -245,11 +355,11 @@ export default function Home() {
           ? `This is a MAJOR solunar period — the strongest feeding window of the day.\n\nCentered at ${p.peakStr}, this window lasts approximately 2 hours (from 1 hour before to 1 hour after the peak).\n\nMajor periods occur when the moon is directly overhead or underfoot. The gravitational pull is at its strongest, triggering biting behaviour across most fish species.`
           : `This is a MINOR solunar period — a secondary feeding window.\n\nCentered at ${p.peakStr}, this window lasts approximately 1 hour.\n\nMinor periods occur at moonrise and moonset. Fish activity increases but typically less dramatically than major periods. Still well worth fishing.`,
         periods: solunar?.periods,
-      })} />
+      })} />}
 
       {/* ── Modals ─────────────────────────────────────────────────────── */}
       <Modal open={showConditions} onClose={() => setShowConditions(false)} title="🌊 Conditions Detail">
-        <ConditionsDetail marine={marine} tides={tides} solunar={solunar} tideType={tideType} nearest={nearest} />
+        <ConditionsDetail marine={marine} tides={tides} solunar={solunar} tideType={tideType} nearest={t4fLocation} />
       </Modal>
 
       <Modal
@@ -603,77 +713,83 @@ function TimeRow({ emoji, label, value }) {
 
 // ── Conditions banner ─────────────────────────────────────────────────────────
 
-function ConditionsBanner({ fetchedAt, loading, error, source, onRefresh }) {
-  if (loading) {
-    return (
-      <div className="flex items-center gap-2 bg-ocean-50 border border-ocean-100 rounded-xl px-4 py-2.5 text-xs text-ocean-600 animate-pulse">
-        <span>🌊</span>
-        <span>Fetching marine conditions…</span>
-      </div>
-    )
-  }
+// ── Conditions banner ─────────────────────────────────────────────────────────
 
-  if (error) {
-    return (
-      <div className="flex items-center justify-between bg-red-50 border border-red-100 rounded-xl px-4 py-2.5">
-        <div className="flex items-center gap-2 text-xs text-red-600">
-          <span>⚠️</span>
-          <span>{error.includes('402')
-            ? 'Stormglass daily limit reached — try refreshing tomorrow'
-            : error.includes('429')
-            ? 'Too many requests — try again later'
-            : `Conditions unavailable: ${error}`}
-          </span>
-        </div>
-        {!error.includes('402') && (
-          <button onClick={onRefresh} className="text-xs text-red-500 font-medium hover:text-red-700 ml-3 shrink-0">
-            Retry
-          </button>
-        )}
-      </div>
-    )
-  }
+function fmtTime(iso) {
+  if (!iso) return null
+  const d = new Date(iso)
+  const time = d.toLocaleTimeString('en-ZA', { hour: '2-digit', minute: '2-digit' })
+  const mins = Math.round((Date.now() - d) / 60000)
+  const ago  = mins < 60 ? `${mins}m ago` : `${Math.floor(mins / 60)}h ${mins % 60}m ago`
+  return { time, ago }
+}
 
-  if (!fetchedAt) return null
+function StatusRow({ icon, label, status, fetchedAt, error }) {
+  const t = fmtTime(fetchedAt)
 
-  const fetchDate = new Date(fetchedAt)
-  const now = new Date()
-  const diffMins = Math.round((now - fetchDate) / 60000)
-  const timeStr = fetchDate.toLocaleTimeString('en-ZA', { hour: '2-digit', minute: '2-digit' })
-  const agoStr = diffMins < 60
-    ? `${diffMins}m ago`
-    : `${Math.floor(diffMins / 60)}h ${diffMins % 60}m ago`
+  if (status === 'loading') return (
+    <div className="flex items-center gap-2 text-xs text-gray-400 animate-pulse">
+      <span>{icon}</span><span>{label} — fetching…</span>
+    </div>
+  )
+  if (status === 'fresh') return (
+    <div className="flex items-center gap-2 text-xs text-emerald-600">
+      <span>🟢</span>
+      <span>{label} — live{t ? <> · <strong>{t.time}</strong> <span className="text-emerald-400">({t.ago})</span></> : ''}</span>
+    </div>
+  )
+  if (status === 'cache') return (
+    <div className="flex items-center gap-2 text-xs text-ocean-600">
+      <span>💾</span>
+      <span>{label} — cached{t ? <> · <strong>{t.time}</strong> <span className="text-ocean-400">({t.ago})</span></> : ''}</span>
+    </div>
+  )
+  if (status === 'limit') return (
+    <div className="flex items-center gap-2 text-xs text-amber-600">
+      <span>⏸️</span><span>{label} — Stormglass daily limit reached, try again tomorrow</span>
+    </div>
+  )
+  if (status === 'no-key') return (
+    <div className="flex items-center gap-2 text-xs text-gray-400">
+      <span>🔑</span><span>{label} — API key not configured</span>
+    </div>
+  )
+  if (status === 'failed') return (
+    <div className="flex items-center gap-2 text-xs text-red-500">
+      <span>⚠️</span>
+      <span>{label} — fetch failed{error ? ` (${error})` : ''}</span>
+    </div>
+  )
+  return null
+}
 
-  if (source === 'default') {
-    return (
-      <div className="flex items-center justify-between bg-amber-50 border border-amber-100 rounded-xl px-4 py-2.5">
-        <div className="flex items-center gap-1.5 text-xs text-amber-700">
-          <span>⚠️</span>
-          <span>Showing <strong>estimated typical conditions</strong> — live data unavailable{error ? ` (${error.replace(' — showing estimated conditions', '')})` : ''}</span>
-        </div>
-        <button onClick={onRefresh} className="text-xs text-amber-600 font-semibold hover:text-amber-800 border border-amber-200 px-2.5 py-1 rounded-lg transition ml-3 shrink-0">
-          ↻ Retry
-        </button>
-      </div>
-    )
-  }
+function ConditionsBanner({ weatherStatus, tidesStatus, weatherFetchedAt, tidesFetchedAt, weatherError, tidesError, isAdmin, onBatchRefresh, batchProgress }) {
+  if (batchProgress && batchProgress !== 'done') return (
+    <div className="flex items-center gap-2 bg-indigo-50 border border-indigo-200 rounded-xl px-4 py-2.5 text-xs text-indigo-700 animate-pulse">
+      <span>⚙️</span><span className="flex-1 truncate">{batchProgress}</span>
+    </div>
+  )
+  if (batchProgress === 'done') return (
+    <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 rounded-xl px-4 py-2.5 text-xs text-emerald-700">
+      <span>✅</span><span>All locations updated</span>
+    </div>
+  )
+  if (!weatherStatus && !tidesStatus) return null
 
   return (
-    <div className="flex items-center justify-between bg-ocean-50 border border-ocean-100 rounded-xl px-4 py-2.5">
-      <div className="flex items-center gap-1.5 text-xs text-ocean-600">
-        <span>{source === 'fresh' ? '🟢' : '💾'}</span>
-        <span>
-          {source === 'fresh' ? 'Live Stormglass data fetched' : 'Conditions loaded from cache'} at{' '}
-          <strong>{timeStr}</strong>
-          <span className="text-ocean-400 ml-1">({agoStr})</span>
-        </span>
-      </div>
-      <button
-        onClick={onRefresh}
-        className="text-xs text-ocean-600 font-semibold hover:text-ocean-800 border border-ocean-200 hover:border-ocean-400 px-2.5 py-1 rounded-lg transition ml-3 shrink-0"
-      >
-        ↻ Refresh
-      </button>
+    <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-sm space-y-1.5">
+      <StatusRow icon="🌤️" label="Weather"  status={weatherStatus} fetchedAt={weatherFetchedAt} error={weatherError} />
+      <StatusRow icon="🌊" label="Tides"    status={tidesStatus}   fetchedAt={tidesFetchedAt}   error={tidesError}   />
+      {isAdmin && (
+        <div className="pt-1.5 border-t border-gray-100 flex justify-end">
+          <button onClick={onBatchRefresh}
+            className="text-xs text-ocean-600 font-semibold hover:text-ocean-800 border border-ocean-200 hover:border-ocean-400 px-2.5 py-1 rounded-lg transition"
+            title="Refresh all locations (uses Stormglass credits)"
+          >
+            ↻ Refresh All Locations
+          </button>
+        </div>
+      )}
     </div>
   )
 }

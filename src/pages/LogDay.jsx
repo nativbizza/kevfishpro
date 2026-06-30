@@ -2,18 +2,48 @@ import { useState, useEffect } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { doc, getDoc } from 'firebase/firestore'
 import { db } from '../firebase'
+import { useAuth } from '../contexts/AuthContext'
 import { getMoonInfo } from '../utils/moonPhase'
 import { SA_FISH_SPECIES, BAIT_OPTIONS, TIDE_TYPES, SA_LOCATIONS } from '../constants'
-import { nearestT4FLocation } from '../utils/tides4fishing'
 import { bearingToCompass } from '../hooks/useStormglass'
+import { locationSlug } from '../hooks/useConditionsCache'
+// nearestT4FLocation removed — location now comes from localStorage saved location
 
-async function getConditionsSnapshot() {
+const LS_KEY = 'kevfishpro_location'
+
+function getSavedLocation() {
+  try { return JSON.parse(localStorage.getItem(LS_KEY) || 'null') } catch { return null }
+}
+
+async function getSavedLocationWithFallback(uid) {
+  // 1. localStorage (instant)
+  const local = getSavedLocation()
+  if (local) return local
+  // 2. Firestore fallback
+  if (!uid) return null
+  try {
+    const snap = await getDoc(doc(db, 'users', uid))
+    if (snap.exists() && snap.data().savedLocation) {
+      const loc = snap.data().savedLocation
+      localStorage.setItem(LS_KEY, JSON.stringify(loc)) // cache it
+      return loc
+    }
+  } catch { /* ignore */ }
+  return null
+}
+
+async function getConditionsSnapshot(slug) {
+  if (!slug) return null
   try {
     const timeout = new Promise((resolve) => setTimeout(() => resolve(null), 4000))
-    const snap = await Promise.race([getDoc(doc(db, 'conditions/cache')), timeout])
+    const snap = await Promise.race([getDoc(doc(db, 'conditions', slug)), timeout])
     if (!snap || !snap.exists?.()) return null
-    const { tides, marine, fetchedAt } = snap.data()
-    return { tides: tides ?? [], marine: marine ?? null, fetchedAt: fetchedAt ?? null }
+    const d = snap.data()
+    // New structure: { weather: { data, fetchedAt }, tides: { data, fetchedAt } }
+    const marine   = d.weather?.data   ?? d.marine   ?? null
+    const tides    = d.tides?.data     ?? d.tides    ?? []
+    const fetchedAt = d.weather?.fetchedAt ?? d.tides?.fetchedAt ?? d.fetchedAt ?? null
+    return { tides, marine, fetchedAt }
   } catch {
     return null
   }
@@ -94,6 +124,7 @@ const emptyForm = () => {
 export default function LogDay({ onSave }) {
   const navigate = useNavigate()
   const { state } = useLocation()
+  const { user } = useAuth()
   const isEditing = !!state?.session
 
   const [form, setForm] = useState(() => {
@@ -126,76 +157,51 @@ export default function LogDay({ onSave }) {
     if (form.date) setMoonInfo(getMoonInfo(new Date(form.date)))
   }, [form.date])
 
-  // Auto-populate location + conditions for new sessions only
+  // Auto-populate location + conditions from saved location
+  // Depends on user?.uid so it re-runs once auth is confirmed
   useEffect(() => {
     if (isEditing) return
-    setAutoPopStatus('loading')
+    if (!user) return  // wait for auth before hitting Firestore
 
     const run = async () => {
+      const saved = await getSavedLocationWithFallback(user?.uid)
+      if (!saved) {
+        setAutoPopStatus(null)
+        return
+      }
+
+      setAutoPopStatus('loading')
       try {
-        // 1. Get GPS location
-        const coords = await new Promise((resolve, reject) => {
-          if (!navigator.geolocation) return reject(new Error('GPS not available on this device'))
-          navigator.geolocation.getCurrentPosition(
-            (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
-            (err) => reject(new Error(
-              err.code === 1 ? 'Location permission denied' :
-              err.code === 2 ? 'GPS position unavailable' :
-              'GPS timed out'
-            )),
-            { timeout: 8000 }
-          )
-        })
+        const slug  = locationSlug(saved.name)
+        const cache = await getConditionsSnapshot(slug)
 
-        // 2. Find nearest SA location
-        const nearest = nearestT4FLocation(coords.lat, coords.lng)
-        const matched = nearest ? matchToSALocation(nearest.name) : null
-
-        if (matched) {
-          setForm((f) => ({ ...f, location: matched }))
-        } else if (nearest) {
-          setForm((f) => ({ ...f, location: 'Other', locationCustom: nearest.name }))
-        }
-
-        // 3. Read conditions cache
-        const cache = await getConditionsSnapshot()
-
-        if (!cache) {
-          setAutoPopStatus({ error: 'Conditions not available — visit the home screen first to load conditions data' })
+        if (!cache?.marine) {
+          setAutoPopStatus({ error: `No conditions data for ${saved.name} yet — open the Home page first to load today's data` })
           return
         }
 
-        // Check if cache is from today
-        const cacheDate = cache.fetchedAt ? new Date(cache.fetchedAt).toISOString().slice(0, 10) : null
-        const today = new Date().toISOString().slice(0, 10)
-        if (cacheDate !== today) {
-          setAutoPopStatus({ error: 'Conditions data is from a previous day — visit home screen to refresh' })
-          return
-        }
-
-        // 4. Pre-fill conditions fields
         const tideType   = inferTideType(cache.tides)
         const tideHeight = currentTideHeight(cache.tides)
         const surfStr    = buildSurfString(cache.marine)
+        const matched    = matchToSALocation(saved.name)
 
         setForm((f) => ({
           ...f,
+          ...(matched
+            ? { location: matched }
+            : { location: 'Other', locationCustom: saved.name }),
           ...(tideType   ? { tideType }   : {}),
           ...(tideHeight ? { tideHeight } : {}),
           ...(surfStr    ? { surfConditions: surfStr } : {}),
         }))
-
         setAutoPopStatus('done')
       } catch (err) {
-        const msg = err.message.includes('402') || err.message.includes('limit')
-          ? 'Auto-population not available — Stormglass daily limit reached, try again tomorrow'
-          : `Auto-population not available — ${err.message}`
-        setAutoPopStatus({ error: msg })
+        setAutoPopStatus({ error: `Auto-population not available — ${err.message}` })
       }
     }
 
     run()
-  }, [isEditing])
+  }, [isEditing, user?.uid])
 
   const set = (field, value) => setForm((f) => ({ ...f, [field]: value }))
 
@@ -232,7 +238,11 @@ export default function LogDay({ onSave }) {
 
       // Best-effort — don't let a slow/failed cache read block the save
       let conditions = null
-      try { conditions = await getConditionsSnapshot() } catch { /* ignore */ }
+      try {
+        const saved = await getSavedLocationWithFallback(user?.uid)
+        const slug = saved ? locationSlug(saved.name) : null
+        conditions = await getConditionsSnapshot(slug)
+      } catch { /* ignore */ }
 
       await onSave(
         {

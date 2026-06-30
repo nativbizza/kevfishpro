@@ -64,7 +64,7 @@ export default function Releases() {
       </div>
 
       <div className="space-y-6">
-        {releases.map((release) => (
+        {releases.map((release, idx) => (
           <div key={release.version} className="bg-white rounded-2xl shadow-sm border border-ocean-100 p-6">
             <div className="flex items-start justify-between gap-4 flex-wrap">
               <div>
@@ -89,13 +89,18 @@ export default function Releases() {
 
             <div className="mt-5 flex flex-wrap gap-2">
               {release.platforms.map((p) => (
-                <PlatformBadge key={p.name} platform={p} />
+                <PlatformBadge
+                  key={p.name}
+                  platform={p.name === 'Android APK' && idx > 0 ? { ...p, available: false, soon: false } : p}
+                />
               ))}
             </div>
 
-            <div className="mt-4 rounded-xl bg-amber-50 border border-amber-200 px-4 py-3 text-xs text-amber-800">
-              <span className="font-semibold">Android install note:</span> After downloading, Android may show a "Blocked by Play Protect" warning. This is normal for apps installed outside the Play Store. Tap <span className="font-semibold">More details</span> then <span className="font-semibold">Install anyway</span> to proceed.
-            </div>
+            {idx === 0 && (
+              <div className="mt-4 rounded-xl bg-amber-50 border border-amber-200 px-4 py-3 text-xs text-amber-800">
+                <span className="font-semibold">Android install note:</span> After downloading, Android may show a "Blocked by Play Protect" warning. This is normal for apps installed outside the Play Store. Tap <span className="font-semibold">More details</span> then <span className="font-semibold">Install anyway</span> to proceed.
+              </div>
+            )}
           </div>
         ))}
       </div>
